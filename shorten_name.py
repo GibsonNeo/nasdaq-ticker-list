@@ -318,6 +318,48 @@ def make_short_name(original: str) -> str:
     if ENFORCE_MAX_NAME_LEN and MAX_NAME_LEN and MAX_NAME_LEN > 0:
         s = enforce_max_len(s, MAX_NAME_LEN)
 
+    # Remove trailing single-character symbol tokens left after cleaning,
+    # e.g. "Acme &" -> "Acme". Only remove if the final token is a
+    # single non-alphanumeric character.
+    def _strip_trailing_symbol(name: str) -> str:
+        t = norm(name)
+        t = _normalize_whitespace(t)
+        if not t:
+            return t
+        parts = t.split()
+        if parts:
+            last = parts[-1]
+            if len(last) == 1 and not last.isalnum():
+                parts = parts[:-1]
+                t = " ".join(parts).strip()
+                t = _normalize_whitespace(t)
+        return t
+
+    s = _strip_trailing_symbol(s)
+
+    # Remove trailing dotted short tokens like "S.A" or "S.A." which
+    # often appear as country/legal suffixes. Match tokens composed of single
+    # letters separated by dots (2-4 groups), e.g. S.A, U.K., S.A.
+    def _strip_trailing_dotted(name: str) -> str:
+        t = norm(name)
+        t = _normalize_whitespace(t)
+        if not t:
+            return t
+        parts = t.split()
+        if not parts:
+            return t
+        last = parts[-1]
+        # pattern: single-letter groups separated by dots, optional trailing dot
+        import re as _re
+
+        if _re.fullmatch(r"^(?:[A-Za-z]\.){1,3}[A-Za-z]\.?$|^(?:[A-Za-z]\.){1,3}$", last):
+            parts = parts[:-1]
+            t = " ".join(parts).strip()
+            t = _normalize_whitespace(t)
+        return t
+
+    s = _strip_trailing_dotted(s)
+
     return s
 
 
