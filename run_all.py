@@ -6,13 +6,12 @@ and installed packages are respected.
 """
 import subprocess
 import sys
-import shutil
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 PY = sys.executable
-# run clean -> enrich -> shorten (shorten expects enriched file)
-SCRIPTS = ["clean_tickers.py", "enrich_sectors.py", "shorten_name.py"]
+# Schwab data already has clean names and sector info, so just run clean
+SCRIPTS = ["clean_tickers.py"]
 
 
 def run_script(script: str) -> None:
@@ -26,17 +25,13 @@ def run_script(script: str) -> None:
 def main() -> None:
     for s in SCRIPTS:
         run_script(s)
-    # After the pipeline, the last script writes
-    # `clean_tickers_enriched_shortnames.csv` by default. Copy it to
-    # `final-tickers.csv` so there's a consistent final filename.
-    last = SCRIPT_DIR / "clean_tickers_enriched_shortnames.csv"
+    # clean_tickers.py now outputs directly to final-tickers.csv
     final = SCRIPT_DIR / "final-tickers.csv"
 
-    if last.exists():
-        shutil.copy2(last, final)
-        print(f"Final output copied to: {final}")
+    if final.exists():
+        print(f"Final output: {final}")
     else:
-        print(f"Warning: expected final file not found: {last}")
+        print(f"Warning: expected final file not found: {final}")
 
     print("All scripts finished successfully.")
 
