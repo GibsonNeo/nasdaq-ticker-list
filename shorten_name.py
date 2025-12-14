@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 # =========================
 # CONFIG
 # =========================
@@ -14,12 +12,33 @@ NAME_COLUMN = None  # examples: "Name", "Security Name", "Company Name"
 OUTPUT_COLUMN = "ShortName"
 
 # If True, replace the original name column instead of creating OUTPUT_COLUMN
-OVERWRITE_NAME_COLUMN = False
+OVERWRITE_NAME_COLUMN = True
 
-# If True, also remove anything after common entity suffixes like Inc, Corporation, Company, Co, etc
-# Example: "Foo Inc. Class A Common Stock" -> "Foo Inc"
-# Example: "Foo Inc. (DE) Common Stock" -> "Foo Inc"
-REMOVE_AFTER_ENTITY_SUFFIX = True
+# Phase 2 option, truncate anything after a legal suffix location, example "Inc of Louisiana" becomes "Inc"
+TRUNCATE_AFTER_LEGAL_SUFFIX = True
+
+# Phase 3 option, remove trailing legal suffix tokens, example "Acme Inc" becomes "Acme"
+REMOVE_TRAILING_LEGAL_SUFFIX_TOKENS = True
+
+# Words you want to keep even if they look like suffixes
+KEEP_SUFFIX_WORDS = {
+    "company",
+    "group",
+    "holdings",
+}
+
+# If True, drop parentheses that look like short all caps codes, example (CDA)
+DROP_SHORT_ALLCAPS_PARENS = True
+DROP_SHORT_ALLCAPS_PARENS_MAXLEN = 4
+
+# Parentheses to keep even if they are short all caps
+KEEP_PAREN_TICKERS = {
+    "mindmed",
+}
+
+# Final phase, enforce max length
+MAX_NAME_LEN = 50  # includes spaces
+ENFORCE_MAX_NAME_LEN = True
 
 # =========================
 # CODE
@@ -80,121 +99,106 @@ _PAREN_NOISE_EXACT = {
     "ca",
     "uk",
     "marshall islands",
-    "de",
-    "delaware",
-    "usa",
-    "u.s.",
-    "us",
+    "s.c",
+    "s.c.",
+    "sc",
 }
-
 
 _TRAILING_PATTERNS = [
     r"\bcommon stock\b",
     r"\bnew common stock\b",
     r"\bcommon shares\b",
+    r"\bcommon shares?\s+of\b.*$",
     r"\bordinary shares\b",
     r"\bvoting common stock\b",
     r"\bclass\s+[a-z]\b",
     r"\bclass\s+[a-z]\s+common stock\b",
     r"\bclass\s+[a-z]\s+ordinary shares\b",
-    r"\bclass\s+[0-9]+\b",
-    r"\bclass\s+[0-9]+\s+common stock\b",
-    r"\bclass\s+[0-9]+\s+ordinary shares\b",
     r"\bseries\s+[a-z]\b",
     r"\bseries\s+[a-z]\s+common stock\b",
-    r"\bseries\s+[0-9]+\b",
-    r"\bseries\s+[0-9]+\s+common stock\b",
     r"\bnonvoting\b",
     r"\bnon voting\b",
-    r"\bdepositary shares\b",
-    r"\bamerican depositary shares\b",
     r"\bdepositary shares\b",
     r"\badr\b",
     r"\bads\b",
     r"\breit\b",
     r"\bbeneficial interest\b",
-    r"\bsub\.?\s*vot\.?\b",
-    r"\bsub\.?\s*voting\b",
+    r"\bbeneficial ownership\b",
+    r"\bshares?\s+of\s+beneficial\s+ownership\b",
     r"\bpar value\b.*$",
     r"\b\$[0-9.]+\s+par value\b.*$",
     r"\bwhen issued\b.*$",
     r"\bunit\b.*$",
-    r"\bunits\b.*$",
     r"\bwarrants?\b.*$",
-    r"\bright(s)?\b.*$",
-    r"\bnotes?\b.*$",
-    r"\bsenior notes?\b.*$",
-    r"\bconvertible notes?\b.*$",
     r"\bordinary shares\s*\(.*\)\b",
+    r"\$\s*\d+(?:\.\d+)?\s*$",
+    r"\$\d+(?:\.\d+)?\s*$",
 ]
 
+_LEGAL_SUFFIX_REGEX = re.compile(
+    r"""
+    \b(
+        incorporated|inc\.?|corp\.?|corporation|
+        company|co\.?|
+        ltd\.?|limited|
+        plc|
+        llc|l\.l\.c\.|
+        lp|l\.p\.|
+        llp|l\.l\.p\.|
+        ag|
+        nv|n\.v\.|
+        sa|s\.a\.|
+        se|
+        spa|s\.p\.a\.|
+        bancorp
+    )\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
-_ENTITY_SUFFIXES = [
+# Tokens we remove only at the end of the final cleaned name
+_TRAILING_SUFFIX_TOKENS = {
     "inc",
     "inc.",
-    "incorporated",
     "corp",
     "corp.",
     "corporation",
     "co",
     "co.",
-    "company",
+    "incorporated",
     "ltd",
     "ltd.",
     "limited",
     "llc",
+    "l.l.c.",
     "plc",
     "lp",
     "l.p.",
-    "sa",
-    "s.a.",
+    "llp",
+    "l.l.p.",
     "ag",
-    "se",
     "nv",
     "n.v.",
-    "bv",
-    "b.v.",
-    "gmbh",
-    "group",
-    "holdings",
-    "holding",
-]
+    "sa",
+    "s.a.",
+    "se",
+    "spa",
+    "s.p.a.",
+}
 
 
-_ENTITY_SUFFIX_RE = re.compile(
-    r"^\s*(?P<base>.*?)\b(?P<suffix>("
-    + "|".join(re.escape(x) for x in _ENTITY_SUFFIXES)
-    + r"))\b(?P<tail>\s+.+)?\s*$",
-    re.IGNORECASE,
-)
-
-
-def trim_after_entity_suffix(name: str) -> str:
-    s = norm(name)
-    m = _ENTITY_SUFFIX_RE.match(s)
-    if not m:
-        return s
-
-    tail = (m.group("tail") or "").strip()
-    if not tail:
-        return s
-
-    base = (m.group("base") or "").strip()
-    suffix = (m.group("suffix") or "").strip()
-    kept = f"{base} {suffix}".strip()
-    kept = re.sub(r"\s+", " ", kept).strip(" ,.;:")
-    return kept
+def _normalize_whitespace(s: str) -> str:
+    s = s.replace("\u00a0", " ")
+    s = s.replace("“", '"').replace("”", '"').replace("’", "'")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def strip_trailing_security_descriptors(name: str) -> str:
     s = norm(name)
+    s = _normalize_whitespace(s)
 
-    # Normalize whitespace and weird quotes
-    s = s.replace("\u00a0", " ")
-    s = s.replace("“", '"').replace("”", '"').replace("’", "'")
-    s = re.sub(r"\s+", " ", s).strip()
-
-    # Remove duplicated company name like "FormFactor Inc. FormFactor Inc. Common Stock"
+    # Remove duplicated company name like "X Inc. X Inc. Common Stock"
     parts = s.split(" ")
     if len(parts) > 6:
         half = len(parts) // 2
@@ -203,21 +207,27 @@ def strip_trailing_security_descriptors(name: str) -> str:
         if left and right.lower().startswith(left.lower()):
             s = right
 
-    # Remove common noise in parentheses anywhere, but keep meaningful ones like (MindMed)
     def paren_repl(m):
         inner = m.group(1).strip()
-        inner_norm = inner.lower()
-        inner_norm = re.sub(r"\s+", " ", inner_norm).strip().strip(".,")
-        if inner_norm in _PAREN_NOISE_EXACT:
+        inner_norm = re.sub(r"\s+", " ", inner).strip().strip(".,")
+        inner_l = inner_norm.lower()
+
+        if inner_l in _PAREN_NOISE_EXACT:
             return ""
-        if re.fullmatch(r"[a-z]{2}", inner_norm):
+
+        if DROP_SHORT_ALLCAPS_PARENS:
+            if re.fullmatch(r"[A-Z]{2,%d}" % DROP_SHORT_ALLCAPS_PARENS_MAXLEN, inner_norm):
+                if inner_l not in KEEP_PAREN_TICKERS:
+                    return ""
+
+        if re.fullmatch(r"[a-z]{2}", inner_l):
             return ""
+
         return f"({inner})"
 
     s = re.sub(r"\(([^)]*)\)", paren_repl, s)
-    s = re.sub(r"\s+", " ", s).strip()
+    s = _normalize_whitespace(s)
 
-    # Remove trailing descriptors, repeatedly, since some names have multiple phrases
     changed = True
     while changed:
         before = s
@@ -228,18 +238,86 @@ def strip_trailing_security_descriptors(name: str) -> str:
             s = re.sub(rf"(?:,?\s+){pat}\s*$", "", s, flags=re.IGNORECASE)
 
         s = re.sub(r"\s*\(\s*\)\s*$", "", s).strip()
-        s = re.sub(r"\s+", " ", s).strip()
+        s = _normalize_whitespace(s)
 
         changed = s != before
 
-    # Optional final trim after entity suffix
-    if REMOVE_AFTER_ENTITY_SUFFIX:
-        s2 = trim_after_entity_suffix(s)
-        if s2:
-            s = s2
-
     s = s.strip(" ,.;:")
-    s = re.sub(r"\s+", " ", s).strip()
+    s = _normalize_whitespace(s)
+    return s
+
+
+def truncate_after_legal_suffix(name: str) -> str:
+    s = norm(name)
+    s = _normalize_whitespace(s)
+
+    m = _LEGAL_SUFFIX_REGEX.search(s)
+    if not m:
+        return s
+
+    cut = m.end()
+    out = s[:cut].rstrip(" ,.;:")
+    out = _normalize_whitespace(out)
+    return out
+
+
+def remove_trailing_legal_suffix_tokens(name: str) -> str:
+    s = norm(name)
+    s = _normalize_whitespace(s)
+    if not s:
+        return s
+
+    keep = {w.lower() for w in KEEP_SUFFIX_WORDS}
+
+    changed = True
+    while changed and s:
+        before = s
+
+        s = s.rstrip(" ,.;:")
+        tokens = s.split(" ")
+        if not tokens:
+            break
+
+        last = tokens[-1].strip(" ,.;:").lower()
+
+        if last in keep:
+            break
+
+        if last in _TRAILING_SUFFIX_TOKENS:
+            tokens = tokens[:-1]
+            s = " ".join(tokens).strip()
+            s = _normalize_whitespace(s)
+
+        changed = s != before
+
+    return s
+
+
+def enforce_max_len(name: str, max_len: int) -> str:
+    s = norm(name)
+    s = _normalize_whitespace(s)
+
+    if len(s) <= max_len:
+        return s
+
+    s = s[:max_len]
+    s = s.rstrip(" ,.;:")
+    s = _normalize_whitespace(s)
+    return s
+
+
+def make_short_name(original: str) -> str:
+    s = strip_trailing_security_descriptors(original)
+
+    if TRUNCATE_AFTER_LEGAL_SUFFIX:
+        s = truncate_after_legal_suffix(s)
+
+    if REMOVE_TRAILING_LEGAL_SUFFIX_TOKENS:
+        s = remove_trailing_legal_suffix_tokens(s)
+
+    if ENFORCE_MAX_NAME_LEN and MAX_NAME_LEN and MAX_NAME_LEN > 0:
+        s = enforce_max_len(s, MAX_NAME_LEN)
+
     return s
 
 
@@ -253,7 +331,7 @@ def main():
     if name_col not in df.columns:
         raise SystemExit(f"Name column not found: {name_col}")
 
-    short = df[name_col].apply(strip_trailing_security_descriptors)
+    short = df[name_col].apply(make_short_name)
 
     if OVERWRITE_NAME_COLUMN:
         df[name_col] = short
@@ -265,7 +343,7 @@ def main():
     print(f"Name column: {name_col}")
     print(f"Wrote: {out_path}")
     print("Sample:")
-    for i in range(min(10, len(df))):
+    for i in range(min(15, len(df))):
         original = norm(df.loc[i, name_col])
         cleaned = norm(short.iloc[i])
         print(f"  {original}  ->  {cleaned}")
